@@ -1,0 +1,5 @@
+{
+  "name": "claude-socio-tecnico",
+  "owner": { "name": "Carlos Daniel Gómez Londoño" },
+  "plugins": [{ "name": "socio-tecnico", "source": "./" }]
+}

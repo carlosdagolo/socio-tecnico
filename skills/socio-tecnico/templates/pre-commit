@@ -1,0 +1,8 @@
+#!/bin/sh
+# Candado local: nadie (ni Claude) hace commit directo en main.
+branch=$(git rev-parse --abbrev-ref HEAD)
+if [ "$branch" = "main" ]; then
+  echo "BLOQUEADO: no se permite commitear directo en main."
+  echo "Cambia a dev: git checkout dev"
+  exit 1
+fi

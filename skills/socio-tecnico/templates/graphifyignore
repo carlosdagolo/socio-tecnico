@@ -1,0 +1,6 @@
+# Ruido que no aporta al grafo. Sintaxis de .gitignore.
+# Código generado (migraciones de EF, snapshots, designer).
+**/Migrations/
+# Tests: para saber qué test cubre algo, grep basta.
+*.Tests/
+tests/
