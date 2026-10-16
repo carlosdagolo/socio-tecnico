@@ -1,6 +1,8 @@
-# Socio técnico: un modelo de trabajo para Claude Code
+# Skill "Socio técnico" para Claude Code
 
-Una skill de Claude Code que convierte a Claude en un socio técnico que trabaja con evidencia, en vez de un asistente que dice "listo" sin haberlo probado.
+> **Es una skill de Claude Code**, empaquetada como plugin junto con sus alertas. Se instala con una sola línea y se usa con `/socio-tecnico:socio-tecnico`.
+
+Esta skill convierte a Claude en un socio técnico que trabaja con evidencia, en vez de un asistente que dice "listo" sin haberlo probado.
 
 Salió de construir un SaaS real con Claude Code: cientos de tests, CI en cada rama y decisiones registradas desde el día uno.
 
@@ -61,13 +63,13 @@ Requisitos: Git, GitHub CLI y Claude Code.
    ```
 2. Instala el plugin. Abre una terminal, corre `claude` y escribe:
    ```
-   /plugin install socio-tecnico --marketplace carlosdagolo/claude-socio-tecnico
+   /plugin install socio-tecnico --marketplace carlosdagolo/socio-tecnico
    ```
    Responde `y` para agregar el marketplace y elige el alcance de usuario (Enter). Desde una terminal normal también sirve:
    ```powershell
-   claude plugin install socio-tecnico --marketplace carlosdagolo/claude-socio-tecnico
+   claude plugin install socio-tecnico --marketplace carlosdagolo/socio-tecnico
    ```
-   En la app de escritorio: + junto al cuadro del prompt → Plugins → Add marketplace (`carlosdagolo/claude-socio-tecnico`) → Add plugin.
+   En la app de escritorio: + junto al cuadro del prompt → Plugins → Add marketplace (`carlosdagolo/socio-tecnico`) → Add plugin.
 3. Abre Claude Code en tu repo y escribe `/socio-tecnico:socio-tecnico setup`. Responde sus preguntas (producto, stack, comandos).
 4. Lo que haces tú en GitHub (Claude no toca permisos ni configuración de tu cuenta):
    - **Proteger main:** Settings → Rules → Rulesets → New branch ruleset → objetivo `main` → "Require a pull request" y "Require status checks to pass" (elige el job `build-and-test`). En repos privados depende de tu plan de GitHub.

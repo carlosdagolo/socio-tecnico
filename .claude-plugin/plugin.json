@@ -1,7 +1,7 @@
 {
   "name": "socio-tecnico",
   "version": "0.1.0",
-  "description": "Modelo de trabajo con evidencia para Claude Code: skill de setup/inicio/cierre, aviso sonoro cuando Claude te espera, franja de estado (contexto, límite, rama, tests, CI) y bloqueo de comandos peligrosos.",
+  "description": "Skill de Claude Code: modelo de trabajo con evidencia para Claude Code: skill de setup/inicio/cierre, aviso sonoro cuando Claude te espera, franja de estado (contexto, límite, rama, tests, CI) y bloqueo de comandos peligrosos.",
   "author": { "name": "Carlos Daniel Gómez Londoño" },
   "types": "./types/index.d.ts"
 }
