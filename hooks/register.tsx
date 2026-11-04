@@ -3,7 +3,7 @@ import type { EngineInterface, Register, SessionContextUsage, SessionRateLimit }
 
 import type { CiRun, GitInfo, TestRun, Usage } from '../types'
 import { checkCommand, isSecretPath } from './guard'
-import { formatSeconds, formatSummary, isDotnetTest, parseOutput, wrapCommand, wrapPowerShell } from './dotnet'
+import { formatSeconds, formatSummary, isDotnetTest, looksCut, parseOutput } from './dotnet'
 import { startAlert, stopAlert, waitReason } from './alert'
 
 const usageAtom = atom({ plugin: 'socio-tecnico', key: 'usage' } as const, null)
@@ -61,31 +61,27 @@ async function refreshGit($: EngineInterface) {
   await update($, gitAtom, () => info)
 }
 
-async function tempDir($: EngineInterface): Promise<string | null> {
-  return (await $.env.get('TEMP')) ?? (await $.env.get('TMP')) ?? null
-}
-
-function stamp(ms: number): string {
-  const d = new Date(ms)
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
-}
-
-const testLogPath = (temp: string, startedAt: number) =>
-  `${temp.replace(/[\\/]+$/, '')}\\socio-dotnet-test-${stamp(startedAt)}.log`
-
-// Lee el log completo, guarda el resultado para la franja y devuelve el resumen.
+// Resume lo que devolvió la herramienta (el comando corre sin reescribir, así el modo automático lo revisa tal cual).
+// Si la salida era grande, la herramienta la guardó en un archivo: se lee de ahí. Guarda el resultado para la franja.
 async function summarizeRun(
   $: EngineInterface,
-  ran: { isError?: true; text?: string },
-  logPath: string,
+  ran: { isError?: true; text?: string; result?: unknown },
   startedAt: number,
 ): Promise<string> {
+  const result = (ran.result ?? {}) as { stdout?: unknown; stderr?: unknown; persistedOutputPath?: unknown }
+  const persistedPath = typeof result.persistedOutputPath === 'string' ? result.persistedOutputPath : undefined
   let output: string
-  try {
-    output = await $.fs.read(logPath)
-  } catch {
-    return `dotnet test: no se pudo leer la salida en ${logPath}.\n${ran.text ?? ''}`
+  if (persistedPath) {
+    try {
+      output = await $.fs.read(persistedPath)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      return `dotnet test: no se pudo leer la salida guardada en ${persistedPath}: ${reason}\n${ran.text ?? ''}`
+    }
+  } else if (ran.isError) {
+    output = ran.text ?? ''
+  } else {
+    output = [result.stdout, result.stderr].filter((s): s is string => typeof s === 'string' && s !== '').join('\n')
   }
   const exitCode = ran.isError ? Number(/Exit code (\d+)/.exec(ran.text ?? '')?.[1] ?? 1) : 0
   const summary = parseOutput(output)
@@ -97,11 +93,11 @@ async function summarizeRun(
     hasSummary: summary.hasSummary,
     seconds: ((await $.clock.now()) - startedAt) / 1000,
     exitCode,
-    logPath,
+    ...(persistedPath ? { logPath: persistedPath } : {}),
   }
   await update($, lastTestAtom, () => run)
   await $.store.set(STORE_LAST_TEST, run)
-  return formatSummary(summary, run)
+  return formatSummary(summary, run, looksCut(output))
 }
 
 function ciLabel(ci: CiRun): string {
@@ -182,28 +178,24 @@ export const register: Register = on => {
     const reason = await checkCommand(e.command, { branchOf: dir => branchOf($, dir) })
     if (reason) return { deny: `socio-tecnico: ${reason}` }
 
-    const temp = isDotnetTest(e.command) && !e.run_in_background ? await tempDir($) : null
-    if (!temp) return next(e)
+    if (!isDotnetTest(e.command) || e.run_in_background) return next(e)
 
     const startedAt = await $.clock.now()
-    const logPath = testLogPath(temp, startedAt)
-    const ran = await next({ ...e, command: wrapCommand(e.command, logPath) })
+    const ran = await next(e)
     if (ran.deny !== undefined) return ran
-    return { result: { stdout: await summarizeRun($, ran, logPath, startedAt), stderr: '', interrupted: false } }
+    return { result: { stdout: await summarizeRun($, ran, startedAt), stderr: '', interrupted: false } }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'socio-tecnico: el guardia falló; comando bloqueado por seguridad.' }))
 
   on('tool.call', { tool: 'PowerShell' }, async ($, e, next) => {
     const reason = await checkCommand(e.command, { branchOf: dir => branchOf($, dir) })
     if (reason) return { deny: `socio-tecnico: ${reason}` }
 
-    const temp = isDotnetTest(e.command) && !e.run_in_background ? await tempDir($) : null
-    if (!temp) return next(e)
+    if (!isDotnetTest(e.command) || e.run_in_background) return next(e)
 
     const startedAt = await $.clock.now()
-    const logPath = testLogPath(temp, startedAt)
-    const ran = await next({ ...e, command: wrapPowerShell(e.command, logPath) })
+    const ran = await next(e)
     if (ran.deny !== undefined) return ran
-    return { result: { stdout: await summarizeRun($, ran, logPath, startedAt), stderr: '', interrupted: false } }
+    return { result: { stdout: await summarizeRun($, ran, startedAt), stderr: '', interrupted: false } }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'socio-tecnico: el guardia falló; comando bloqueado por seguridad.' }))
 
   on('tool.call', { tool: 'Read' }, ($, e, next) =>

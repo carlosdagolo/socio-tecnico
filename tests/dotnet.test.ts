@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { isDotnetTest, parseOutput, wrapCommand } from '../hooks/dotnet'
+import { isDotnetTest, parseOutput } from '../hooks/dotnet'
 
 const FAILED_RUN = [
   '  Determining projects to restore...',
@@ -35,10 +35,6 @@ describe('dotnet test parsing', () => {
     expect(isDotnetTest('grep -n "resumen de dotnet test" register.tsx')).toBe(false)
     expect(isDotnetTest('git commit -m "fix: dotnet test summary"')).toBe(false)
     expect(isDotnetTest("sed -i '/de dotnet test/d' x.ts")).toBe(false)
-  })
-
-  test('keeps the exit code by grouping and redirecting', () => {
-    expect(wrapCommand('dotnet test', 'C:\\Temp\\a.log')).toBe('{ dotnet test\n} > "C:/Temp/a.log" 2>&1')
   })
 
   test('sums the summary and extracts each failure with its error', () => {
@@ -113,16 +109,58 @@ describe('dotnet test parsing', () => {
 })
 
 describe('Bash hook', () => {
-  test('writes the full output to TEMP and returns only the summary', async ($, on) => {
+  test('runs the original command and summarizes its stdout', async ($, on) => {
     mock.clock(on, { now: Date.UTC(2026, 9, 15, 12) })
-    mock.env(on, { TEMP: 'C:\\Users\\x\\AppData\\Local\\Temp' })
     mock.store(on)
     let ranCommand = ''
-    let readPath = ''
     on('tool.call', { tool: 'Bash' }, async (_$, e) => {
       ranCommand = e.command
-      return { isError: true, result: 'Exit code 1', text: 'Exit code 1' }
+      return { result: { stdout: FAILED_RUN, stderr: '', interrupted: false } }
     })
+
+    const r = await $.tool.call({ tool: 'Bash', command: 'dotnet test MyApp.sln' })
+
+    // Sin reescribir: el modo automático revisa exactamente lo que corre.
+    expect(ranCommand).toBe('dotnet test MyApp.sln')
+    const stdout = (r.result as { stdout: string }).stdout
+    expect(stdout).toContain('311 correctas, 1 fallidas, 2 omitidas, 314 total')
+    expect(stdout).toContain('ConfirmSale_ShouldRejectPartialPayment')
+    expect(stdout).not.toContain('Determining projects')
+  })
+
+  test('summarizes the text of a failed run and keeps its exit code', async ($, on) => {
+    mock.clock(on)
+    mock.store(on)
+    on('tool.call', { tool: 'Bash' }, async () => ({ isError: true, result: 'Exit code 1', text: `Exit code 1\n${FAILED_RUN}` }))
+
+    const r = await $.tool.call({ tool: 'Bash', command: 'dotnet test MyApp.sln' })
+
+    const stdout = (r.result as { stdout: string }).stdout
+    expect(stdout).toContain('311 correctas, 1 fallidas, 2 omitidas, 314 total')
+    expect(stdout).toContain('exit 1')
+  })
+
+  test('says the output was cut and invents no numbers', async ($, on) => {
+    mock.clock(on)
+    mock.store(on)
+    const cut = 'Exit code 1\n  Determining projects to restore...\n\n... [20012 characters truncated] ...\n\nlinea 641 xxxx'
+    on('tool.call', { tool: 'Bash' }, async () => ({ isError: true, result: cut, text: cut }))
+
+    const r = await $.tool.call({ tool: 'Bash', command: 'dotnet test MyApp.sln' })
+
+    const stdout = (r.result as { stdout: string }).stdout
+    expect(stdout).toContain('salida recortada')
+    expect(stdout).not.toContain('correctas')
+    expect(stdout).not.toContain('compilación')
+  })
+
+  test('reads the persisted output when the tool saved it to a file', async ($, on) => {
+    mock.clock(on)
+    mock.store(on)
+    let readPath = ''
+    on('tool.call', { tool: 'Bash' }, async () => ({
+      result: { stdout: 'primeras lineas', stderr: '', interrupted: false, persistedOutputPath: 'C:\\r\\tool-results\\a.txt', persistedOutputSize: 70954 },
+    }))
     on('fs.read', async (_$, e) => {
       readPath = e.path
       return { value: FAILED_RUN }
@@ -130,13 +168,25 @@ describe('Bash hook', () => {
 
     const r = await $.tool.call({ tool: 'Bash', command: 'dotnet test MyApp.sln' })
 
-    expect(ranCommand).toMatch(/^\{ dotnet test MyApp\.sln\n\} > "C:\/Users\/x\/AppData\/Local\/Temp\/socio-dotnet-test-\d{8}-\d{6}\.log" 2>&1$/)
-    expect(readPath).toMatch(/^C:\\Users\\x\\AppData\\Local\\Temp\\socio-dotnet-test-.*\.log$/)
+    expect(readPath).toBe('C:\\r\\tool-results\\a.txt')
     expect((r.result as { stdout: string }).stdout).toContain('311 correctas, 1 fallidas, 2 omitidas, 314 total')
-    expect((r.result as { stdout: string }).stdout).toContain('exit 1')
-    expect((r.result as { stdout: string }).stdout).toContain('ConfirmSale_ShouldRejectPartialPayment')
-    expect((r.result as { stdout: string }).stdout).toContain(`Salida completa: ${readPath}`)
-    expect((r.result as { stdout: string }).stdout).not.toContain('Determining projects')
+  })
+
+  test('shows the real error when the persisted output cannot be read', async ($, on) => {
+    mock.clock(on)
+    mock.store(on)
+    on('tool.call', { tool: 'Bash' }, async () => ({
+      result: { stdout: 'primeras lineas', stderr: '', interrupted: false, persistedOutputPath: 'C:\\r\\a.txt', persistedOutputSize: 70954 },
+    }))
+    on('fs.read', async () => {
+      throw new Error('ENOENT: no such file')
+    })
+
+    const r = await $.tool.call({ tool: 'Bash', command: 'dotnet test MyApp.sln' })
+
+    // El motor de pruebas reemplaza el error lanzado por su propio mensaje; lo que importa es que el motivo aparezca.
+    const stdout = (r.result as { stdout: string }).stdout
+    expect(stdout).toMatch(/no se pudo leer la salida guardada en C:\\r\\a\.txt: \S/)
   })
 
   test('denies a commit while the current branch is main', async ($, on) => {
@@ -151,19 +201,6 @@ describe('Bash hook', () => {
 
     expect(hasRun).toBe(false)
     expect(r.deny).toContain('commit en main')
-  })
-
-  test('says where the log was when it cannot be read', async ($, on) => {
-    mock.clock(on)
-    mock.env(on, { TEMP: 'C:/Temp' })
-    on('tool.call', { tool: 'Bash' }, async () => ({ isError: true, result: 'Exit code 1', text: 'Exit code 1' }))
-    on('fs.read', async () => {
-      throw new Error('ENOENT')
-    })
-
-    const r = await $.tool.call({ tool: 'Bash', command: 'dotnet test' })
-
-    expect((r.result as { stdout: string }).stdout).toContain('no se pudo leer la salida en C:/Temp\\socio-dotnet-test-')
   })
 
   test('denies a forbidden command before it runs', async ($, on) => {
@@ -198,18 +235,16 @@ describe('Bash hook', () => {
 describe('PowerShell hook', () => {
   test('summarizes a dotnet test run through PowerShell too', async ($, on) => {
     mock.clock(on, { now: Date.UTC(2026, 9, 15, 12) })
-    mock.env(on, { TEMP: 'C:/Temp' })
     mock.store(on)
     let ranCommand = ''
     on('tool.call', { tool: 'PowerShell' }, async (_$, e) => {
       ranCommand = e.command
-      return { isError: true, result: 'Exit code 1', text: 'Exit code 1' }
+      return { isError: true, result: 'Exit code 1', text: `Exit code 1\n${FAILED_RUN}` }
     })
-    on('fs.read', async () => ({ value: '\uFEFF' + FAILED_RUN }))
 
     const r = await $.tool.call({ tool: 'PowerShell', command: 'dotnet test MyApp.sln' })
 
-    expect(ranCommand).toMatch(/^& \{\ndotnet test MyApp\.sln\n\} \*>&1 \| Out-File -FilePath 'C:\/Temp\\socio-dotnet-test-\d{8}-\d{6}\.log' -Encoding utf8; exit \$LASTEXITCODE$/)
+    expect(ranCommand).toBe('dotnet test MyApp.sln')
     const stdout = (r.result as { stdout: string }).stdout
     expect(stdout).toContain('311 correctas, 1 fallidas, 2 omitidas, 314 total')
     expect(stdout).toContain('exit 1')
