@@ -3,13 +3,8 @@ import type { TestRun } from '../types'
 // Solo cuando dotnet es el comando (inicio, tras ; && || | ( o comillas de -Command), no cuando se menciona en un texto.
 export const isDotnetTest = (command: string) => /(^|[;&|(\n"'])\s*(&\s*)?dotnet(\.exe)?\s+test\b/.test(command)
 
-// Agrupa el comando y manda toda su salida al archivo; conserva el código de salida.
-export const wrapCommand = (command: string, logPath: string) =>
-  `{ ${command}\n} > "${logPath.replace(/\\/g, '/')}" 2>&1`
-
-// PowerShell: todos los flujos al archivo en UTF-8 (">" en Windows PowerShell 5.1 escribe UTF-16).
-export const wrapPowerShell = (command: string, logPath: string) =>
-  `& {\n${command}\n} *>&1 | Out-File -FilePath '${logPath.replace(/'/g, "''")}' -Encoding utf8; exit $LASTEXITCODE`
+// La herramienta recorta lo que devuelve: "[N characters truncated]" en errores y <persisted-output> en salidas grandes.
+export const looksCut = (output: string) => /characters truncated|<persisted-output>/.test(output)
 
 type Summary = Omit<TestRun, 'seconds' | 'exitCode' | 'logPath'> & { failures: string[]; tail: string[] }
 
@@ -62,9 +57,12 @@ export function formatSeconds(seconds: number): string {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
 }
 
-export function formatSummary(s: Summary, run: TestRun): string {
+export function formatSummary(s: Summary, run: TestRun, isCut = false): string {
+  const when = `${formatSeconds(run.seconds)} · exit ${run.exitCode}`
   const head = s.hasSummary
-    ? `dotnet test: ${s.passed} correctas, ${s.failed} fallidas, ${s.skipped} omitidas, ${s.total} total · ${formatSeconds(run.seconds)} · exit ${run.exitCode}`
-    : `dotnet test: sin resumen de tests (¿falló la compilación?) · ${formatSeconds(run.seconds)} · exit ${run.exitCode}`
-  return [head, ...s.failures, ...s.tail, `Salida completa: ${run.logPath}`].join('\n')
+    ? `dotnet test: ${s.passed} correctas, ${s.failed} fallidas, ${s.skipped} omitidas, ${s.total} total · ${when}`
+    : isCut
+      ? `dotnet test: salida recortada por la herramienta, sin resumen fiable (no se inventan cifras) · ${when}`
+      : `dotnet test: sin resumen de tests (¿falló la compilación?) · ${when}`
+  return [head, ...s.failures, ...s.tail, ...(run.logPath ? [`Salida completa: ${run.logPath}`] : [])].join('\n')
 }

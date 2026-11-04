@@ -37,7 +37,7 @@ Es un plugin de Claude Code con dos partes:
 
 - **Aviso sonoro** cuando Claude termina, te pide permiso o te hace una pregunta. Se repite cada 2 minutos, hasta 10 veces, mientras no respondas. `/silencio` lo apaga o lo enciende. En Windows suena con PowerShell.
 - **Franja sobre el prompt:** contexto usado, límite semanal, rama actual, último test y estado de la CI de la rama (con `gh`). Avisa cuando el contexto pasa del 85 %.
-- **Resumen de `dotnet test`:** la salida completa va a un log en %TEMP% y Claude ve solo el resumen y los fallos (menos tokens).
+- **Resumen de `dotnet test`:** Claude ve solo el resumen y los fallos (menos tokens). El comando corre tal cual, sin reescribirlo, para que el modo automático lo revise. Si la salida es grande, se lee el archivo donde la herramienta la guardó; si quedó recortada y no hay resumen, lo dice y no inventa cifras.
 - **Guardián:** bloquea leer `.env`, `secrets.json` y `appsettings.Development.json`, `dotnet ef database update`, `git reset --hard`, `--no-verify`, borrar ramas, y commits o push a main. Es de mejor esfuerzo: un comando ofuscado puede escapar, por eso los permisos de `settings.json` son la segunda capa.
 
 El resumen de tests y parte del guardián están pensados para .NET. El resto sirve para cualquier stack.

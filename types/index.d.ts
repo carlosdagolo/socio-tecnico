@@ -16,7 +16,7 @@ export type TestRun = {
   seconds: number
   exitCode: number
   hasSummary: boolean
-  logPath: string
+  logPath?: string
 }
 
 declare module 'claude-code' {

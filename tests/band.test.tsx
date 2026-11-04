@@ -47,15 +47,15 @@ const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isSt
 test('band shows branch, last test run and CI after a turn', async ($, on) => {
   mock.store(on)
   mock.clock(on)
-  mock.env(on, { TEMP: 'C:/Temp' })
   const argvs: string[][] = []
   on('process.run', async (_$, e) => {
     argvs.push([...e.argv])
     if (e.argv[0] === 'git') return ok('feat/socio\n')
     return ok('[{"status":"completed","conclusion":"failure","workflowName":"ci"}]')
   })
-  on('tool.call', { tool: 'Bash' }, async () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
-  on('fs.read', async () => ({ value: 'Passed!  - Failed:     0, Passed:   12, Skipped:     1, Total:    13, Duration: 3 s - X.dll' }))
+  on('tool.call', { tool: 'Bash' }, async () => ({
+    result: { stdout: 'Passed!  - Failed:     0, Passed:   12, Skipped:     1, Total:    13, Duration: 3 s - X.dll', stderr: '', interrupted: false },
+  }))
   on('turn.complete', async (_$, e) => ({ text: e.answer }))
 
   await $.tool.call({ tool: 'Bash', command: 'dotnet test --filter Sales' })
