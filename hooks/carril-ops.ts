@@ -17,39 +17,57 @@ export function accountOf(configDir: string | undefined): string {
 // PID y hora de inicio del proceso que lanza los comandos (la sesión de Claude): el padre de este PowerShell.
 const WHO_AM_I =
   '$p=(Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId;' +
-  '"$p $((Get-Process -Id $p).StartTime.ToFileTimeUtc())"'
+  '"$p $((Get-Process -Id $p).StartTime.ToFileTimeUtc()) $((Get-Process -Id $p).ProcessName)"'
 
-const startOf = (pid: number) =>
-  `$x=Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($x) { $x.StartTime.ToFileTimeUtc() }`
+// "VIVO <inicio>" o "MUERTO": cualquier otra salida (error, Access denied, tiempo agotado) no prueba que murió.
+const STATUS_OF = (pid: number) =>
+  `$x=Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($x) { "VIVO $($x.StartTime.ToFileTimeUtc())" } else { "MUERTO" }`
 
 const powershell = (script: string) => ['powershell', '-NoProfile', '-NonInteractive', '-Command', script]
 
-export async function whoAmI($: EngineInterface): Promise<Me> {
+/** Interpreta la salida de STATUS_OF: false solo con MUERTO o con otro proceso en el mismo PID. */
+export function aliveFrom(exitCode: number, stdout: string, pidStart: string): boolean {
+  const out = stdout.trim()
+  if (exitCode === 0 && out === 'MUERTO') return false
+  const started = /^VIVO (\S+)$/.exec(out)?.[1]
+  if (exitCode === 0 && started) return started === pidStart
+  return true
+}
+
+export async function whoAmI($: EngineInterface): Promise<Me & { processName: string }> {
   const account = accountOf(await $.env.get('CLAUDE_CONFIG_DIR'))
   const r = await $.process.run(powershell(WHO_AM_I), { timeoutMs: 30_000 })
-  const [pid, pidStart] = r.stdout.trim().split(/\s+/)
+  const [pid, pidStart, processName = '?'] = r.stdout.trim().split(/\s+/)
   if (!ok(r) || !/^\d+$/.test(pid ?? '') || !pidStart) throw new Error(`no se pudo leer el PID de la sesión (${r.stderr.trim()})`)
-  return { account, pid: Number(pid), pidStart }
+  return { account, pid: Number(pid), pidStart, processName }
 }
 
 export function processOps($: EngineInterface, dir: string): CarrilOps {
   const lock = `${dir}\\turno`
   const ownerFile = `${lock}\\dueno.json`
+  // Candado de quien libera un turno vencido: uno a la vez, así nadie borra un turno recién tomado por otro.
+  const evicting = `${dir}\\liberando`
   const cmd = (...args: string[]) => $.process.run(['cmd', '/d', '/c', ...args], { timeoutMs: 30_000 })
 
-  async function readLockAt(path: string): Promise<Lock> {
-    if (!(await $.fs.exists(path))) return { kind: 'none' }
+  async function readLock(): Promise<Lock> {
+    if (!(await $.fs.exists(lock))) return { kind: 'none' }
     try {
-      const owner = JSON.parse(await $.fs.read(`${path}\\dueno.json`)) as Owner
-      if (typeof owner.token === 'string' && typeof owner.pid === 'number') return { kind: 'owner', owner }
+      const owner = JSON.parse(await $.fs.read(ownerFile)) as Owner
+      if (typeof owner.token === 'string' && Number.isInteger(owner.pid) && typeof owner.pidStart === 'string')
+        return { kind: 'owner', owner }
     } catch {
       // Sin dueno.json legible: la carpeta quedó a medias o la están creando.
     }
     try {
-      return { kind: 'partial', mtimeMs: (await $.fs.stat(path)).mtimeMs }
+      return { kind: 'partial', mtimeMs: (await $.fs.stat(lock)).mtimeMs }
     } catch {
       return { kind: 'none' }
     }
+  }
+
+  async function remove(path: string): Promise<boolean> {
+    await cmd('rmdir', '/s', '/q', path)
+    return !(await $.fs.exists(path))
   }
 
   return {
@@ -62,23 +80,34 @@ export function processOps($: EngineInterface, dir: string): CarrilOps {
       throw new Error(`no se pudo crear ${lock}: ${r.stderr.trim() || r.stdout.trim()}`)
     },
     writeOwner: owner => $.fs.write(ownerFile, JSON.stringify(owner)),
-    readLock: () => readLockAt(lock),
+    readLock,
     async isAlive(pid, pidStart) {
-      const r = await $.process.run(powershell(startOf(pid)), { timeoutMs: 30_000 })
-      return ok(r) && r.stdout.trim() === pidStart
+      try {
+        const r = await $.process.run(powershell(STATUS_OF(pid)), { timeoutMs: 30_000 })
+        return aliveFrom(r.exitCode, r.stdout, pidStart)
+      } catch {
+        return true // no se pudo saber: se asume vivo y se sigue esperando
+      }
     },
     async evict(token) {
-      // Se renombra (atómico) y se confirma que era el vencido; si alguien lo tomó en medio, se devuelve.
-      const aside = `${lock}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.viejo`
-      if (!ok(await cmd('move', lock, aside))) return
-      const moved = await readLockAt(aside)
-      const movedToken = moved.kind === 'owner' ? moved.owner.token : null
-      if (movedToken !== token && ok(await cmd('move', aside, lock))) return
-      await cmd('rmdir', '/s', '/q', aside)
+      if (!ok(await cmd('mkdir', evicting))) {
+        // Otro lo está liberando; si su candado quedó colgado (más de 30 s), se quita para el próximo intento.
+        const stat = await $.fs.stat(evicting).catch(() => null)
+        if (stat && (await $.clock.now()) - stat.mtimeMs > 30_000) await remove(evicting)
+        return false
+      }
+      try {
+        // Con el candado puesto, se confirma que sigue siendo el mismo turno vencido antes de borrarlo.
+        const now = await readLock()
+        const current = now.kind === 'owner' ? now.owner.token : now.kind === 'partial' ? null : undefined
+        if (current === undefined) return true // ya no hay turno
+        if (current !== token) return false // alguien lo tomó en medio: no se toca
+        return await remove(lock)
+      } finally {
+        await remove(evicting)
+      }
     },
-    async remove() {
-      await cmd('rmdir', '/s', '/q', lock)
-    },
+    remove: () => remove(lock),
     async sleep(ms) {
       // Una pausa hecha por un proceso: mientras corre, no gasta el presupuesto de tiempo del hook ($.clock.sleep sí).
       await $.process.run(powershell(`Start-Sleep -Milliseconds ${Math.round(ms)}`), { timeoutMs: ms + 30_000 })

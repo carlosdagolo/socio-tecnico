@@ -12,6 +12,8 @@ function fakePc(start = Date.UTC(2026, 10, 19, 12)) {
     sleeps: 0,
     shutdowns: 0,
     removes: 0,
+    /** La carpeta del turno no se deja borrar (antivirus, indexador). */
+    locked: false,
   }
   let tokens = 0
   const ops: CarrilOps = {
@@ -29,11 +31,16 @@ function fakePc(start = Date.UTC(2026, 10, 19, 12)) {
       !pc.lock ? { kind: 'none' } : pc.lock.owner ? { kind: 'owner', owner: pc.lock.owner } : { kind: 'partial', mtimeMs: pc.lock.mtimeMs },
     isAlive: async (pid, pidStart) => pc.alive.get(pid) === pidStart,
     evict: async token => {
-      if ((pc.lock?.owner?.token ?? null) === token) pc.lock = null
+      if (pc.locked) return false
+      if ((pc.lock?.owner?.token ?? null) !== token) return false
+      pc.lock = null
+      return true
     },
     remove: async () => {
       pc.removes++
+      if (pc.locked) return false
       pc.lock = null
+      return true
     },
     sleep: async ms => {
       pc.sleeps++
@@ -229,5 +236,62 @@ describe('carril: esperar', () => {
 
   test('waitMessage says when the turn is being taken and has no owner yet', () => {
     expect(waitMessage(null, 0)).toContain('esperando turno')
+  })
+})
+
+describe('carril: hallazgos del /code-review', () => {
+  test('does not spin forever when an expired turn cannot be freed: waits with pauses and gives up', async () => {
+    const { pc, ops } = fakePc()
+    pc.locked = true
+    pc.lock = { mtimeMs: pc.now, owner: ownerOf(cuenta2, pc.now) } // dueño muerto, pero la carpeta no se deja borrar
+
+    const taken = await take(ops, cuenta1, jest, { limits: { ...LIMITS, maxWaitMs: 60_000 } })
+
+    expect(taken.ok).toBe(false)
+    if (!taken.ok) expect(taken.message).toContain('no se pudo liberar')
+    expect(pc.sleeps).toBe(12)
+  })
+
+  test('does not spin forever when freeing says it worked but the turn is still there', async () => {
+    const { pc, ops } = fakePc()
+    pc.lock = { mtimeMs: pc.now, owner: ownerOf(cuenta2, pc.now) } // dueño muerto
+    const lying: CarrilOps = { ...ops, evict: async () => true } // dice que lo quitó, pero sigue ahí
+
+    const taken = await take(lying, cuenta1, jest, { limits: { ...LIMITS, maxWaitMs: 30_000 } })
+
+    expect(taken.ok).toBe(false)
+    expect(pc.sleeps).toBe(6)
+  })
+
+  test('tells when its own turn could not be let go, after retrying', async () => {
+    const { pc, ops } = fakePc()
+    const stuck: string[] = []
+
+    await withTurn(
+      ops,
+      cuenta1,
+      jest,
+      async () => {
+        pc.locked = true
+      },
+      { onStuck: m => stuck.push(m) },
+    )
+
+    expect(pc.removes).toBe(3)
+    expect(stuck).toHaveLength(1)
+    expect(stuck[0]).toContain('Remove-Item')
+  })
+
+  test('removes the half-made folder when writing the owner fails', async () => {
+    const { pc, ops } = fakePc()
+    const failing: CarrilOps = {
+      ...ops,
+      writeOwner: async () => {
+        throw new Error('disco lleno')
+      },
+    }
+
+    await expect(take(failing, cuenta1, jest)).rejects.toThrow('disco lleno')
+    expect(pc.lock).toBeNull()
   })
 })

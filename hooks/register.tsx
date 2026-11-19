@@ -107,6 +107,7 @@ type ShellNext<E, R> = ((e: E) => Promise<R>) & { readonly signal: AbortSignal }
 
 // Quién soy (cuenta, PID y hora de inicio de la sesión): se pregunta una vez por carga del módulo.
 let me: Promise<Me> | null = null
+let hasWarnedNoLocalAppData = false
 
 async function shellCall<E extends ShellEvent, R extends { deny?: string; isError?: true; text?: string; result?: unknown }>($: EngineInterface, e: E, next: ShellNext<E, R>): Promise<R | { deny: string } | { result: { stdout: string; stderr: string; interrupted: boolean } }> {
   const reason = await checkCommand(e.command, { branchOf: dir => branchOf($, dir) })
@@ -124,33 +125,57 @@ async function shellCall<E extends ShellEvent, R extends { deny?: string; isErro
   }
   if (!heavy) return run()
 
-  // Carril pesado. Si no se puede montar (sin LOCALAPPDATA, sin PowerShell), el comando corre sin turno y se avisa.
+  // Carril pesado. Si no se puede montar o tomar (sin LOCALAPPDATA, sin PowerShell, sin permiso en la carpeta), el
+  // comando corre sin turno y se avisa: el carril cuida la memoria del PC, no la seguridad, y no debe bloquear el trabajo.
+  const withoutTurn = (reason: string) => {
+    $.ui.toast(`socio-tecnico: carril pesado no disponible (${reason}); ${heavy.label} corre sin turno.`)
+    return run()
+  }
   let ops
   try {
     const dir = await $.env.get('LOCALAPPDATA')
-    if (!dir) return run()
+    if (!dir) {
+      if (hasWarnedNoLocalAppData) return run()
+      hasWarnedNoLocalAppData = true
+      return withoutTurn('falta LOCALAPPDATA')
+    }
     me ??= whoAmI($).catch(error => {
       me = null
       throw error
     })
     ops = { ops: processOps($, `${dir}\\socio-tecnico\\carril`), me: await me }
   } catch (error) {
-    $.ui.toast(`carril pesado no disponible (${error instanceof Error ? error.message : String(error)}); ${heavy.label} corre sin turno.`)
-    return run()
+    return withoutTurn(error instanceof Error ? error.message : String(error))
   }
 
   let warned = false
-  const turn = await withTurn(ops.ops, ops.me, heavy, run, {
-    signal: next.signal,
-    onWait: message => {
-      $.ui.status(`⏳ ${message}`)
-      if (!warned) $.ui.toast(`socio-tecnico: ${message}`)
-      warned = true
-    },
-  }).finally(() => {
+  let hasRun = false
+  try {
+    const turn = await withTurn(
+      ops.ops,
+      ops.me,
+      heavy,
+      () => {
+        hasRun = true
+        return run()
+      },
+      {
+        signal: next.signal,
+        onWait: message => {
+          $.ui.status(`⏳ ${message}`)
+          if (!warned) $.ui.toast(`socio-tecnico: ${message}`)
+          warned = true
+        },
+        onStuck: message => $.ui.toast(`socio-tecnico: ${message}`),
+      },
+    )
+    return turn.ran ? turn.value : { deny: `socio-tecnico: ${turn.message}. Reintenta cuando se libere.` }
+  } catch (error) {
+    if (hasRun) throw error // falló el comando: su error sigue su camino
+    return withoutTurn(error instanceof Error ? error.message : String(error))
+  } finally {
     if (warned) $.ui.status(undefined)
-  })
-  return turn.ran ? turn.value : { deny: `socio-tecnico: ${turn.message}. Reintenta cuando se libere.` }
+  }
 }
 
 function ciLabel(ci: CiRun): string {

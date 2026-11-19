@@ -6,14 +6,20 @@ import { executableText, startsCommand } from './shell'
 
 export type Heavy = { label: string; isDotnet: boolean }
 
+// Fin de palabra que no acepta guion: "dotnet build-server" no es "dotnet build", ni "jest-junit" es "jest".
+const END = String.raw`(?![\w-])`
+// Opciones de npm o npx antes del subcomando, con o sin valor ("--prefix app", "--yes", "-w=app").
+const NPM_OPTIONS = String.raw`(?:--?[\w-]+(?:=\S+|\s+(?!(?:test|t|run|jest|playwright|expo)\b)[^-\s]\S*)?\s+)*`
+const NPX = String.raw`(?:npx(?:\.cmd)?\s+${NPM_OPTIONS})?(?:\S*[\\/])?`
+
 const HEAVY: [RegExp, string, boolean][] = [
-  [startsCommand(String.raw`dotnet(?:\.exe)?\s+test\b`), 'dotnet test', true],
-  [startsCommand(String.raw`dotnet(?:\.exe)?\s+build\b`), 'dotnet build', true],
-  [startsCommand(String.raw`(?:npx\s+)?(?:\S*[\\/])?playwright\s+test\b`), 'playwright', false],
-  [startsCommand(String.raw`npm(?:\.cmd)?\s+(?:--?\S+\s+)*run\s+e2e\b`), 'npm run e2e', false],
-  [startsCommand(String.raw`npm(?:\.cmd)?\s+(?:--?\S+\s+)*(?:test|t|run\s+test)\b`), 'npm test', false],
-  [startsCommand(String.raw`(?:npx\s+)?(?:\S*[\\/])?jest\b`), 'jest', false],
-  [startsCommand(String.raw`(?:npx\s+)?expo\s+export\b`), 'expo export', false],
+  [startsCommand(String.raw`dotnet(?:\.exe)?\s+test${END}`), 'dotnet test', true],
+  [startsCommand(String.raw`dotnet(?:\.exe)?\s+build${END}`), 'dotnet build', true],
+  [startsCommand(String.raw`${NPX}playwright\s+test${END}`), 'playwright', false],
+  [startsCommand(String.raw`npm(?:\.cmd)?\s+${NPM_OPTIONS}run\s+e2e${END}`), 'npm run e2e', false],
+  [startsCommand(String.raw`npm(?:\.cmd)?\s+${NPM_OPTIONS}(?:test|t|run\s+test)${END}`), 'npm test', false],
+  [startsCommand(String.raw`${NPX}jest${END}`), 'jest', false],
+  [startsCommand(String.raw`${NPX}expo\s+export${END}`), 'expo export', false],
 ]
 
 /** El primer comando pesado que el comando ejecuta de verdad (no el que solo menciona en un texto), o null. */
@@ -44,10 +50,12 @@ export type CarrilOps = {
   tryCreate(): Promise<boolean>
   writeOwner(owner: Owner): Promise<void>
   readLock(): Promise<Lock>
+  /** false solo si se sabe que el proceso ya no existe (o es otro con el mismo PID); ante un error, true. */
   isAlive(pid: number, pidStart: string): Promise<boolean>
   /** Quita un turno vencido sin pisar uno nuevo: solo si sigue teniendo ese token (null: sin dueno.json). */
-  evict(token: string | null): Promise<void>
-  remove(): Promise<void>
+  evict(token: string | null): Promise<boolean>
+  /** Borra la carpeta del turno; true si ya no está. */
+  remove(): Promise<boolean>
   sleep(ms: number): Promise<void>
   shutdownDotnet(): Promise<void>
 }
@@ -89,30 +97,54 @@ export async function take(
   const limits = options.limits ?? LIMITS
   const startedAt = await ops.now()
   const token = ops.newToken()
+  // Reintentos sin pausa (se soltó entre dos pasos, o se quitó un turno vencido): pocos, y después se espera como
+  // siempre, así el bucle no gira sin fin si la carpeta no se deja borrar.
+  let quickRetries = 0
   for (;;) {
     if (await ops.tryCreate()) {
-      await ops.writeOwner({ ...me, command: heavy.label, at: await ops.now(), token })
+      try {
+        await ops.writeOwner({ ...me, command: heavy.label, at: await ops.now(), token })
+      } catch (error) {
+        await ops.remove().catch(() => false)
+        throw error
+      }
       return { ok: true, token }
     }
     const lock = await ops.readLock()
     const now = await ops.now()
-    if (lock.kind === 'none') continue // se soltó entre los dos pasos: intentar de nuevo
-    if (await isStale(ops, lock, now, limits)) {
-      await ops.evict(lock.kind === 'owner' ? lock.owner.token : null)
-      continue
+    const owner = lock.kind === 'owner' ? lock.owner : null
+    let message = waitMessage(owner, now)
+    if (quickRetries < 3) {
+      if (lock.kind === 'none') {
+        quickRetries++
+        continue
+      }
+      if (await isStale(ops, lock, now, limits)) {
+        quickRetries++
+        if (await ops.evict(owner?.token ?? null)) continue
+        message = `${message}; el turno está vencido pero no se pudo liberar`
+      }
     }
-    const message = waitMessage(lock.kind === 'owner' ? lock.owner : null, now)
     if (options.signal?.aborted) return { ok: false, message: `cancelado mientras ${message}` }
     if (now - startedAt >= limits.maxWaitMs) return { ok: false, message }
     options.onWait?.(message)
     await ops.sleep(limits.stepMs)
+    quickRetries = 0
   }
 }
 
-/** Suelta el turno solo si sigue siendo de este token (si se venció y otro lo tomó, no lo toca). */
-export async function release(ops: CarrilOps, token: string): Promise<void> {
-  const lock = await ops.readLock()
-  if (lock.kind === 'owner' && lock.owner.token === token) await ops.remove()
+/**
+ * Suelta el turno solo si sigue siendo de este token (si se venció y otro lo tomó, no lo toca). Reintenta si la
+ * carpeta no se deja borrar (antivirus, indexador) y devuelve false si quedó puesta.
+ */
+export async function release(ops: CarrilOps, token: string, retryMs = 1_000): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const lock = await ops.readLock()
+    if (lock.kind !== 'owner' || lock.owner.token !== token) return true
+    if (await ops.remove().catch(() => false)) return true
+    await ops.sleep(retryMs)
+  }
+  return false
 }
 
 export type CarrilResult<T> = { ran: true; value: T } | { ran: false; message: string }
@@ -123,7 +155,12 @@ export async function withTurn<T>(
   me: Me,
   heavy: Heavy,
   run: () => Promise<T>,
-  options: { limits?: Limits; signal?: AbortSignal; onWait?: (message: string) => void } = {},
+  options: {
+    limits?: Limits
+    signal?: AbortSignal
+    onWait?: (message: string) => void
+    onStuck?: (message: string) => void
+  } = {},
 ): Promise<CarrilResult<T>> {
   const taken = await take(ops, me, heavy, options)
   if (!taken.ok) return { ran: false, message: taken.message }
@@ -131,7 +168,12 @@ export async function withTurn<T>(
     return { ran: true, value: await run() }
   } finally {
     if (heavy.isDotnet) await ops.shutdownDotnet().catch(() => undefined)
-    await release(ops, taken.token).catch(() => undefined)
+    const released = await release(ops, taken.token).catch(() => false)
+    if (!released)
+      options.onStuck?.(
+        'no se pudo soltar el turno del carril pesado; se libera solo en 30 min o con ' +
+          'Remove-Item -Recurse "$env:LOCALAPPDATA\\socio-tecnico\\carril\\turno"',
+      )
   }
 }
 

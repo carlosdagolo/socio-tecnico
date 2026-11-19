@@ -11,7 +11,8 @@ describe('shell: lo que de verdad se ejecuta', () => {
     expect(executableText("$t = @'\nnpm test\n'@\nWrite-Output $t")).not.toContain('npm')
     expect(executableText('powershell -NoProfile -Command "cd app; npm test"')).toContain('npm test')
     expect(executableText("bash -c 'dotnet build'")).toContain('dotnet build')
-    expect(executableText('echo "a \\" dotnet test"; ls')).not.toContain('dotnet')
+    // Sin escapes dentro de comillas: ante la duda se ve de más (un turno de sobra) y no se esconde un comando real.
+    expect(executableText('echo "a \\" dotnet test"; ls')).toContain('dotnet test')
   })
 })
 
@@ -47,6 +48,26 @@ describe('shell: comandos pesados', () => {
       'echo dotnet-test',
     ]
     for (const command of light) expect(heavyCommand(command)).toBeNull()
+  })
+})
+
+describe('shell: hallazgos del /code-review', () => {
+  test('sees heavy commands behind a PowerShell path ending in \\, a # comment, -lc, env vars, wrappers and npm options', () => {
+    const heavy: [string, string][] = [
+      ['Set-Location "C:\\repo\\"; dotnet test BarberShop.sln; Write-Output "fin"', 'dotnet test'],
+      ["# don't touch\ndotnet test", 'dotnet test'],
+      ['bash -lc "cd app && npm test"', 'npm test'],
+      ['CI=true npx jest', 'jest'],
+      ['timeout 600 dotnet test BarberShop.Tests', 'dotnet test'],
+      ['npm --prefix app test', 'npm test'],
+      ['npx --yes jest --ci', 'jest'],
+      ['npm run test:unit', 'npm test'],
+    ]
+    for (const [command, label] of heavy) expect(heavyCommand(command)?.label).toBe(label)
+  })
+
+  test('does not take dotnet build-server, jest-* or e2e-* tools as heavy', () => {
+    for (const command of ['dotnet build-server shutdown', 'npx jest-junit', 'npm run e2e-report']) expect(heavyCommand(command)).toBeNull()
   })
 })
 

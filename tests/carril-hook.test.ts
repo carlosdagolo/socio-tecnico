@@ -1,15 +1,18 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
-import type { On } from 'claude-code/testing'
+import type { TestBody } from 'claude-code/testing'
+
+type On = Parameters<TestBody>[1]
 
 // El carril a través del hook de Bash y PowerShell, con el sistema simulado: cmd (mkdir, rmdir, move), PowerShell
 // (quién soy, si un PID vive, pausas), dotnet build-server y $.fs sobre un disco en memoria.
 const LOCALAPPDATA = 'C:\\Users\\x\\AppData\\Local'
 const LOCK = `${LOCALAPPDATA}\\socio-tecnico\\carril\\turno`
 
-function fakeWindows(on: On) {
+function fakeWindows(on: On, options: { mkdirFails?: boolean } = {}) {
   const files = new Map<string, string>()
   const dirs = new Set<string>()
   const log: string[] = []
+  const toasts: string[] = []
   const done = (stdout = '', exitCode = 0) => ({
     value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   })
@@ -20,7 +23,7 @@ function fakeWindows(on: On) {
       const [verb, ...args] = argv.slice(3)
       log.push(`${verb} ${args.join(' ')}`)
       if (verb === 'mkdir') {
-        if (dirs.has(args[0]!)) return done('', 1)
+        if (options.mkdirFails || dirs.has(args[0]!)) return done('', 1)
         dirs.add(args[0]!)
         return done()
       }
@@ -54,9 +57,12 @@ function fakeWindows(on: On) {
     return { value: undefined }
   })
   on('fs.stat', async () => ({ value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } }))
-  on('ui.toast', async () => ({ value: undefined }))
+  on('ui.toast', async (_$, e) => {
+    toasts.push(JSON.stringify(e))
+    return { value: undefined }
+  })
   on('ui.status', async () => ({ value: undefined }))
-  return { log, dirs }
+  return { log, dirs, toasts }
 }
 
 describe('carril pesado en el hook', () => {
@@ -115,5 +121,41 @@ describe('carril pesado en el hook', () => {
     await $.tool.call({ tool: 'Bash', command: 'gh issue create --body "turno (dotnet test, jest)"' })
 
     expect(log).toEqual([])
+  })
+
+  test('runs the command without a turn (and says so) when the turn folder cannot be created', async ($, on) => {
+    mock.clock(on, { now: Date.UTC(2026, 10, 19, 12) })
+    mock.store(on)
+    mock.env(on, { LOCALAPPDATA })
+    const { toasts } = fakeWindows(on, { mkdirFails: true })
+    let hasRun = false
+    on('tool.call', { tool: 'Bash' }, async () => {
+      hasRun = true
+      return { result: { stdout: 'ok', stderr: '', interrupted: false } }
+    })
+
+    const r = await $.tool.call({ tool: 'Bash', command: 'npx jest' })
+
+    expect(r.deny).toBeUndefined()
+    expect(hasRun).toBe(true)
+    expect(toasts.join()).toContain('corre sin turno')
+  })
+
+  test('warns once when LOCALAPPDATA is missing and runs without a turn', async ($, on) => {
+    mock.clock(on, { now: Date.UTC(2026, 10, 19, 12) })
+    mock.store(on)
+    mock.env(on, {})
+    const { toasts } = fakeWindows(on)
+    let runs = 0
+    on('tool.call', { tool: 'Bash' }, async () => {
+      runs++
+      return { result: { stdout: 'ok', stderr: '', interrupted: false } }
+    })
+
+    await $.tool.call({ tool: 'Bash', command: 'npx jest' })
+    await $.tool.call({ tool: 'Bash', command: 'npx jest' })
+
+    expect(runs).toBe(2)
+    expect(toasts.filter(t => t.includes('LOCALAPPDATA'))).toHaveLength(1)
   })
 })
