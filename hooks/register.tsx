@@ -5,6 +5,8 @@ import type { CiRun, GitInfo, TestRun, Usage } from '../types'
 import { checkCommand, isSecretPath } from './guard'
 import { formatSeconds, formatSummary, isDotnetTest, looksCut, parseOutput } from './dotnet'
 import { startAlert, stopAlert, waitReason } from './alert'
+import { BACKGROUND_DENIED, heavyCommand, withTurn, type Me } from './carril'
+import { processOps, whoAmI } from './carril-ops'
 
 const usageAtom = atom({ plugin: 'socio-tecnico', key: 'usage' } as const, null)
 const gitAtom = atom({ plugin: 'socio-tecnico', key: 'git' } as const, null)
@@ -100,6 +102,57 @@ async function summarizeRun(
   return formatSummary(summary, run, looksCut(output))
 }
 
+type ShellEvent = { command: string; run_in_background?: boolean }
+type ShellNext<E, R> = ((e: E) => Promise<R>) & { readonly signal: AbortSignal }
+
+// Quién soy (cuenta, PID y hora de inicio de la sesión): se pregunta una vez por carga del módulo.
+let me: Promise<Me> | null = null
+
+async function shellCall<E extends ShellEvent, R extends { deny?: string; isError?: true; text?: string; result?: unknown }>($: EngineInterface, e: E, next: ShellNext<E, R>): Promise<R | { deny: string } | { result: { stdout: string; stderr: string; interrupted: boolean } }> {
+  const reason = await checkCommand(e.command, { branchOf: dir => branchOf($, dir) })
+  if (reason) return { deny: `socio-tecnico: ${reason}` }
+
+  const heavy = heavyCommand(e.command)
+  if (heavy && e.run_in_background) return { deny: `socio-tecnico: ${BACKGROUND_DENIED}` }
+
+  const run = async () => {
+    if (!isDotnetTest(e.command) || e.run_in_background) return next(e)
+    const startedAt = await $.clock.now()
+    const ran = await next(e)
+    if (ran.deny !== undefined) return ran
+    return { result: { stdout: await summarizeRun($, ran, startedAt), stderr: '', interrupted: false } }
+  }
+  if (!heavy) return run()
+
+  // Carril pesado. Si no se puede montar (sin LOCALAPPDATA, sin PowerShell), el comando corre sin turno y se avisa.
+  let ops
+  try {
+    const dir = await $.env.get('LOCALAPPDATA')
+    if (!dir) return run()
+    me ??= whoAmI($).catch(error => {
+      me = null
+      throw error
+    })
+    ops = { ops: processOps($, `${dir}\\socio-tecnico\\carril`), me: await me }
+  } catch (error) {
+    $.ui.toast(`carril pesado no disponible (${error instanceof Error ? error.message : String(error)}); ${heavy.label} corre sin turno.`)
+    return run()
+  }
+
+  let warned = false
+  const turn = await withTurn(ops.ops, ops.me, heavy, run, {
+    signal: next.signal,
+    onWait: message => {
+      $.ui.status(`⏳ ${message}`)
+      if (!warned) $.ui.toast(`socio-tecnico: ${message}`)
+      warned = true
+    },
+  }).finally(() => {
+    if (warned) $.ui.status(undefined)
+  })
+  return turn.ran ? turn.value : { deny: `socio-tecnico: ${turn.message}. Reintenta cuando se libere.` }
+}
+
 function ciLabel(ci: CiRun): string {
   if (ci.status !== 'completed') return `CI … ${ci.status}`
   return `CI ${ci.conclusion === 'success' ? '✓' : '✗'} ${ci.conclusion}`
@@ -173,30 +226,12 @@ export const register: Register = on => {
     return { text: isMuted ? 'Aviso sonoro apagado en esta sesión.' : 'Aviso sonoro encendido.' }
   })
 
-  // Bloqueos + resumen de dotnet test, en Bash y en PowerShell.
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    const reason = await checkCommand(e.command, { branchOf: dir => branchOf($, dir) })
-    if (reason) return { deny: `socio-tecnico: ${reason}` }
+  // Bloqueos, carril pesado y resumen de dotnet test, en Bash y en PowerShell.
+  on('tool.call', { tool: 'Bash' }, ($, e, next) => shellCall($, e, next))
+    .catch(($, e, next) => (next.called ? next(e) : { deny: 'socio-tecnico: el guardia falló; comando bloqueado por seguridad.' }))
 
-    if (!isDotnetTest(e.command) || e.run_in_background) return next(e)
-
-    const startedAt = await $.clock.now()
-    const ran = await next(e)
-    if (ran.deny !== undefined) return ran
-    return { result: { stdout: await summarizeRun($, ran, startedAt), stderr: '', interrupted: false } }
-  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'socio-tecnico: el guardia falló; comando bloqueado por seguridad.' }))
-
-  on('tool.call', { tool: 'PowerShell' }, async ($, e, next) => {
-    const reason = await checkCommand(e.command, { branchOf: dir => branchOf($, dir) })
-    if (reason) return { deny: `socio-tecnico: ${reason}` }
-
-    if (!isDotnetTest(e.command) || e.run_in_background) return next(e)
-
-    const startedAt = await $.clock.now()
-    const ran = await next(e)
-    if (ran.deny !== undefined) return ran
-    return { result: { stdout: await summarizeRun($, ran, startedAt), stderr: '', interrupted: false } }
-  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'socio-tecnico: el guardia falló; comando bloqueado por seguridad.' }))
+  on('tool.call', { tool: 'PowerShell' }, ($, e, next) => shellCall($, e, next))
+    .catch(($, e, next) => (next.called ? next(e) : { deny: 'socio-tecnico: el guardia falló; comando bloqueado por seguridad.' }))
 
   on('tool.call', { tool: 'Read' }, ($, e, next) =>
     isSecretPath(e.file_path) ? { deny: `socio-tecnico: leer ${e.file_path} está prohibido (secretos fuera del chat).` } : next(e),
