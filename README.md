@@ -38,6 +38,15 @@ Es un plugin de Claude Code con dos partes:
 - **Aviso sonoro** cuando Claude termina, te pide permiso o te hace una pregunta. Se repite cada 2 minutos, hasta 10 veces, mientras no respondas. `/silencio` lo apaga o lo enciende. En Windows suena con PowerShell.
 - **Franja sobre el prompt:** contexto usado, límite semanal, rama actual, último test y estado de la CI de la rama (con `gh`). Avisa cuando el contexto pasa del 85 %.
 - **Resumen de `dotnet test`:** Claude ve solo el resumen y los fallos (menos tokens). El comando corre tal cual, sin reescribirlo, para que el modo automático lo revise. Si la salida es grande, se lee el archivo donde la herramienta la guardó; si quedó recortada y no hay resumen, lo dice y no inventa cifras.
+- **Carril pesado** (Windows, desde 0.2.0). Hace que dos sesiones o cuentas de Claude no corran procesos pesados a la vez en el mismo PC.
+  - **Qué cuenta como pesado:** `dotnet test` y `dotnet build`, `jest`, `npm test`, Playwright, `npm run e2e` y `expo export`.
+  - **El turno:** antes de cada uno se toma un turno en `%LOCALAPPDATA%\socio-tecnico\carril\turno`, una carpeta que se crea de forma atómica.
+  - **Si el turno está ocupado:** espera hasta 9 min y avisa "esperando turno de cuenta N (comando, hace X min)". Si se cumple el tiempo, rechaza el comando con ese aviso.
+  - **Al terminar:** suelta el turno apenas termina el comando, también si falla. Después de dotnet, antes de soltarlo, corre `dotnet build-server shutdown`.
+  - **Turno abandonado:** se libera al instante si su dueño ya no corre. Si lleva más de 30 min, se libera aunque el dueño siga.
+  - **Segundo plano:** un comando pesado en segundo plano se rechaza.
+  - **Turno colgado:** `Remove-Item -Recurse "$env:LOCALAPPDATA\socio-tecnico\carril\turno"`.
+  - Solo se reconoce lo que de verdad se ejecuta, no un texto entre comillas o en un heredoc que lo menciona. Lo mismo vale para el resumen de `dotnet test`.
 - **Guardián:** bloquea leer `.env`, `secrets.json` y `appsettings.Development.json`, `dotnet ef database update`, `git reset --hard`, `--no-verify`, borrar ramas, y commits o push a main. Es de mejor esfuerzo: un comando ofuscado puede escapar, por eso los permisos de `settings.json` son la segunda capa.
 
 El resumen de tests y parte del guardián están pensados para .NET. El resto sirve para cualquier stack.

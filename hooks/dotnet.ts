@@ -1,7 +1,10 @@
 import type { TestRun } from '../types'
+import { executableText, startsCommand } from './shell'
 
-// Solo cuando dotnet es el comando (inicio, tras ; && || | ( o comillas de -Command), no cuando se menciona en un texto.
-export const isDotnetTest = (command: string) => /(^|[;&|(\n"'])\s*(&\s*)?dotnet(\.exe)?\s+test\b/.test(command)
+// Solo cuando dotnet test se ejecuta (inicio, tras ; && || | ( o dentro de -Command "..."), no cuando un texto lo menciona,
+// por ejemplo el cuerpo de un gh issue create o un heredoc.
+const DOTNET_TEST = startsCommand(String.raw`dotnet(?:\.exe)?\s+test\b`)
+export const isDotnetTest = (command: string) => DOTNET_TEST.test(executableText(command))
 
 // La herramienta recorta lo que devuelve: "[N characters truncated]" en errores y <persisted-output> en salidas grandes.
 export const looksCut = (output: string) => /characters truncated|<persisted-output>/.test(output)

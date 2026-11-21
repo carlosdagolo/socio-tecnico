@@ -112,6 +112,7 @@ describe('Bash hook', () => {
   test('runs the original command and summarizes its stdout', async ($, on) => {
     mock.clock(on, { now: Date.UTC(2026, 9, 15, 12) })
     mock.store(on)
+    mock.env(on, {})
     let ranCommand = ''
     on('tool.call', { tool: 'Bash' }, async (_$, e) => {
       ranCommand = e.command
@@ -131,6 +132,7 @@ describe('Bash hook', () => {
   test('summarizes the text of a failed run and keeps its exit code', async ($, on) => {
     mock.clock(on)
     mock.store(on)
+    mock.env(on, {})
     on('tool.call', { tool: 'Bash' }, async () => ({ isError: true, result: 'Exit code 1', text: `Exit code 1\n${FAILED_RUN}` }))
 
     const r = await $.tool.call({ tool: 'Bash', command: 'dotnet test MyApp.sln' })
@@ -143,6 +145,7 @@ describe('Bash hook', () => {
   test('says the output was cut and invents no numbers', async ($, on) => {
     mock.clock(on)
     mock.store(on)
+    mock.env(on, {})
     const cut = 'Exit code 1\n  Determining projects to restore...\n\n... [20012 characters truncated] ...\n\nlinea 641 xxxx'
     on('tool.call', { tool: 'Bash' }, async () => ({ isError: true, result: cut, text: cut }))
 
@@ -157,6 +160,7 @@ describe('Bash hook', () => {
   test('reads the persisted output when the tool saved it to a file', async ($, on) => {
     mock.clock(on)
     mock.store(on)
+    mock.env(on, {})
     let readPath = ''
     on('tool.call', { tool: 'Bash' }, async () => ({
       result: { stdout: 'primeras lineas', stderr: '', interrupted: false, persistedOutputPath: 'C:\\r\\tool-results\\a.txt', persistedOutputSize: 70954 },
@@ -175,6 +179,7 @@ describe('Bash hook', () => {
   test('shows the real error when the persisted output cannot be read', async ($, on) => {
     mock.clock(on)
     mock.store(on)
+    mock.env(on, {})
     on('tool.call', { tool: 'Bash' }, async () => ({
       result: { stdout: 'primeras lineas', stderr: '', interrupted: false, persistedOutputPath: 'C:\\r\\a.txt', persistedOutputSize: 70954 },
     }))
@@ -236,6 +241,7 @@ describe('PowerShell hook', () => {
   test('summarizes a dotnet test run through PowerShell too', async ($, on) => {
     mock.clock(on, { now: Date.UTC(2026, 9, 15, 12) })
     mock.store(on)
+    mock.env(on, {})
     let ranCommand = ''
     on('tool.call', { tool: 'PowerShell' }, async (_$, e) => {
       ranCommand = e.command
@@ -266,6 +272,7 @@ describe('PowerShell hook', () => {
   })
 
   test('leaves other PowerShell commands untouched', async ($, on) => {
+    mock.env(on, {})
     let ranCommand = ''
     on('tool.call', { tool: 'PowerShell' }, async (_$, e) => {
       ranCommand = e.command
